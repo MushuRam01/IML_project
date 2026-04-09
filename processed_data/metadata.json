@@ -1,10 +1,10 @@
 {
-  "rows": 572602,
-  "columns": 73,
+  "rows": 572427,
+  "columns": 65,
   "split_counts": {
-    "train": 406951,
-    "test": 114139,
-    "validation": 51512
+    "train": 400606,
+    "validation": 114257,
+    "test": 57564
   },
   "categorical_columns": [
     "Size_Label",
@@ -14,9 +14,6 @@
     "Mom_Label"
   ],
   "feature_columns": [
-    "Momentum",
-    "log_ret",
-    "lag_ret",
     "mktcap",
     "price",
     "equity_bv_on_stkdate",
@@ -42,6 +39,7 @@
     "Inv",
     "OpProf_Label",
     "Inv_Label",
+    "Momentum",
     "Mom_Label",
     "ret_lag_1",
     "ret_lag_3",
@@ -51,9 +49,12 @@
     "ret_rolling_mean_6m",
     "ret_rolling_std_6m",
     "ret_rolling_count_3m",
-    "log_ret_lag_1",
-    "log_ret_lag_3",
-    "log_ret_lag_6",
     "month_index"
-  ]
+  ],
+  "split_mode": "time",
+  "split_date_source": "month",
+  "time_split": {
+    "train_end_month": "2019-09",
+    "validation_end_month": "2023-09"
+  }
 }
