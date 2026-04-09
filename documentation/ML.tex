@@ -1,0 +1,271 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+
+\title{CatBoost + CNN Residual Learning: Formal Description}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Notation and Dataset}
+
+Let $i \in \{1,\dots,N_c\}$ index companies and let $t$ index months. Each row in the
+panel is a company--month pair $(i,t)$. The target is the gross return
+$y_{i,t}$ stored in \texttt{monthly\_gross\_return}. For interpretation, define the
+net return $r_{i,t} = y_{i,t} - 1$, but the pipeline models $y_{i,t}$ directly.
+Let $\mathbf{x}_{i,t} \in \mathbb{R}^d$ be the raw feature vector for $(i,t)$, and
+let $X \in \mathbb{R}^{N \times d}$ collect all rows, with row index
+$r = r(i,t)$ so that $X_{r,:} = \mathbf{x}_{i,t}$.
+
+The dataset is a monthly panel containing:
+\begin{itemize}
+	\item \textbf{Identifiers:} \texttt{co\_code}, \texttt{Month}.
+	\item \textbf{Target:} \texttt{monthly\_gross\_return}.
+	\item \textbf{Market variables:} \texttt{mktcap}, \texttt{price},
+	\texttt{lag\_mv}, \texttt{BM\_sep}.
+	\item \textbf{Accounting variables:} \texttt{equity\_bv\_on\_stkdate},
+	\texttt{fy\_book\_value}, \texttt{sa\_net\_worth}, \texttt{sa\_total\_assets},
+	\texttt{sa\_sales}, \texttt{sa\_cost\_of\_goods\_sold},
+	\texttt{sa\_total\_interest\_exp}, \texttt{sa\_selling\_distribution\_exp},
+	\texttt{lagged\_book\_equity}, \texttt{lagged\_assets}, \texttt{lagged2\_assets}.
+	\item \textbf{Factor signals:} \texttt{OpProf}, \texttt{Inv}, \texttt{Momentum}.
+	\item \textbf{Categorical labels:} \texttt{Size\_Label} (S/B),
+	\texttt{BM\_Label} (G/N/V), \texttt{OpProf\_Label} (W/N/R),
+	\texttt{Inv\_Label} (A/N/C), \texttt{Mom\_Label} (L/N/W).
+\end{itemize}
+
+Company \texttt{co\_code = 194} is removed from the initial dataset and treated as
+a standalone holdout company for out-of-sample evaluation.
+
+\section{Problem Formulation}
+
+The learning task is to predict the gross return $y_{i,t}$ using information
+available up to month $t$. We write the prediction as
+\[
+\hat{y}_{i,t} = f_{\theta}(\mathcal{I}_{i,t}),
+\]
+where $\mathcal{I}_{i,t}$ includes the current engineered features and short
+historical windows. The objective is a regression loss such as mean squared
+error (MSE):
+\[
+\theta^* = \arg\min_{\theta} \frac{1}{N} \sum_{(i,t)} (y_{i,t} - \hat{y}_{i,t})^2.
+\]
+
+\section{Preprocessing Summary}
+
+The preprocessing stage (see preprocess.tex) ensures time ordering and
+leakage-safe features by:
+\begin{itemize}
+	\item coercing types (dates, numeric, categorical),
+	\item engineering lags and rolling statistics from past returns,
+	\item adding missingness indicators,
+	\item splitting into train/validation/test and masking test targets,
+	\item removing raw return columns \texttt{lag\_ret} and \texttt{log\_ret}.
+\end{itemize}
+
+We denote the final tabular feature vector after preprocessing by
+$\tilde{\mathbf{x}}_{i,t} \in \mathbb{R}^{d'}$.
+
+\section{Model Structure}
+
+The pipeline uses a two-stage additive model:
+\[
+\hat{y}_{i,t} = \underbrace{f_{\text{CB}}(\tilde{\mathbf{x}}_{i,t})}_{\text{CatBoost}}
+\; + \; \underbrace{f_{\text{CNN}}(\mathcal{S}_{i,t})}_{\text{residual correction}}.
+\]
+
+The diagram below summarizes the flow:
+\[
+\begin{array}{c}
+\text{processed panel } (i,t)
+\\ \downarrow \\
+f_{\text{CB}} \;\Rightarrow\; \hat{y}^{\text{CB}}_{i,t}
+\\ \downarrow \\
+e_{i,t} = y_{i,t} - \hat{y}^{\text{CB}}_{i,t}
+\\ \downarrow \\
+f_{\text{CNN}} \;\Rightarrow\; \hat{e}_{i,t}
+\\ \downarrow \\
+\hat{y}_{i,t} = \hat{y}^{\text{CB}}_{i,t} + \hat{e}_{i,t}
+\end{array}
+\]
+
+\section{CatBoost Stage}
+
+CatBoost is trained on the train split with categorical columns passed
+explicitly. The model minimizes RMSE on the training set and uses the validation
+split for early stopping.
+
+\subsection{CatBoost Residuals}
+
+After fitting CatBoost, the residual for each row is defined as
+\[
+e_{i,t} = y_{i,t} - \hat{y}^{\text{CB}}_{i,t},
+\quad \hat{y}^{\text{CB}}_{i,t} = f_{\text{CB}}(\tilde{\mathbf{x}}_{i,t}).
+\]
+Residuals on the validation split become the training targets for the CNN.
+
+\section{Residual CNN Stage}
+
+\subsection{CNN Input Construction}
+
+Let $L=6$ be the sequence length. For each company $i$ and month $t$ with at
+least $L$ months of history, define the sequence
+\[
+\mathcal{S}_{i,t} =
+\begin{bmatrix}
+\mathbf{z}_{i,t-L+1}^\top \\
+\vdots \\
+\mathbf{z}_{i,t}^\top
+\end{bmatrix}
+\in \mathbb{R}^{L \times d'},
+\]
+where $\mathbf{z}_{i,t}$ is the normalized feature vector formed by concatenating
+$\tilde{\mathbf{x}}_{i,t}$ with the CatBoost prediction
+$\hat{y}^{\text{CB}}_{i,t}$. Each numeric component is standardized using
+\[
+\mathbf{z}_{i,t} = \frac{\tilde{\mathbf{x}}_{i,t} - \boldsymbol{\mu}}{\boldsymbol{\sigma}},
+\]
+with $\boldsymbol{\mu}$ and $\boldsymbol{\sigma}$ computed on the validation
+sub-split used for CNN training. Non-finite values are set to zero after
+normalization. Categorical labels are encoded as integer category codes using a
+global category map; unseen categories map to \texttt{\_\_MISSING\_\_}.
+
+\subsection{CNN Architecture}
+
+The residual CNN is a 1D convolutional network over time:
+\begin{itemize}
+	\item input channels: $d'$ (features plus \texttt{cb\_pred}),
+	\item Conv1d(64, kernel=3, padding=1) + ReLU,
+	\item Conv1d(32, kernel=3, padding=1) + ReLU,
+	\item AdaptiveAvgPool1d(1),
+	\item Linear(32 $\to$ 1).
+\end{itemize}
+The network outputs $\hat{e}_{i,t}$, the predicted residual.
+
+\subsection{CNN Objective}
+
+The CNN minimizes MSE on residuals:
+\[
+\min_{\phi} \frac{1}{N_{\text{seq}}} \sum_{(i,t)}
+\left(e_{i,t} - f_{\text{CNN}}(\mathcal{S}_{i,t})\right)^2.
+\]
+
+\section{Training Protocol}
+
+\begin{itemize}
+	\item \textbf{CatBoost:} trained on \texttt{train} with validation for early
+	stopping; GPU is used when available, with CPU fallback.
+	\item \textbf{CNN:} trained on the validation split only
+	(\texttt{USE\_FULL\_VALIDATION\_FOR\_CNN = True}).
+	\item \textbf{Random seeds:} NumPy and PyTorch seeds are set to 42 for
+	reproducibility.
+\end{itemize}
+
+\section{Inference Protocol}
+
+Given a new split (test or holdout):
+\begin{enumerate}
+	\item Compute $\hat{y}^{\text{CB}}_{i,t}$ using the CatBoost model.
+	\item Build sequences $\mathcal{S}_{i,t}$ when at least $L$ months of
+	history exist; otherwise no CNN residual is produced for that row.
+	\item Predict residuals $\hat{e}_{i,t}$ with the CNN and set
+	$\hat{e}_{i,t}=0$ when no sequence is available.
+	\item Return the final prediction
+	$\hat{y}_{i,t} = \hat{y}^{\text{CB}}_{i,t} + \hat{e}_{i,t}$.
+\end{enumerate}
+This inference path performs no parameter updates.
+
+\section{Hyperparameters Used}
+
+\subsection*{CatBoost}
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Parameter & Value \\
+\midrule
+Loss / Eval metric & RMSE \\
+Iterations & 1500 \\
+Depth & 10 \\
+Learning rate & 0.05 \\
+L2 leaf reg & 3.0 \\
+Random seed & 42 \\
+Verbose & 100 \\
+Task type & GPU (CPU fallback) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection*{Residual CNN}
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Parameter & Value \\
+\midrule
+Sequence length $L$ & 6 \\
+Batch size & 1024 \\
+Epochs & 30 \\
+Learning rate & $10^{-3}$ \\
+Weight decay & $10^{-4}$ \\
+Optimizer & Adam \\
+Training split & Validation only \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\appendix
+\section{CatBoost from First Principles}
+
+CatBoost is a gradient boosted decision tree method designed to handle
+categorical features and reduce prediction bias. Let $\mathcal{L}(y, F(x))$ be a
+loss function and define the additive model
+\[
+F_M(x) = \sum_{m=1}^{M} \eta_m h_m(x),
+\]
+where $h_m$ is a decision tree and $\eta_m$ is a learning rate. Gradient boosting
+fits $h_m$ to the negative gradient of the loss:
+\[
+g_m(x_i) = -\left.\frac{\partial \mathcal{L}(y_i, F(x_i))}{\partial F}\right|_{F=F_{m-1}},
+\quad h_m \approx \arg\min_h \sum_i (g_m(x_i) - h(x_i))^2.
+\]
+The model updates as $F_m(x) = F_{m-1}(x) + \eta_m h_m(x)$.
+
+\subsection*{Oblivious (Symmetric) Trees}
+
+CatBoost uses symmetric trees where the same splitting feature and threshold are
+applied at each level. A depth-$d$ oblivious tree has $2^d$ leaves and can be
+written as
+\[
+h(x) = w_{\ell(x)}, \quad \ell(x) \in \{0,\dots,2^d-1\},
+\]
+where $\ell(x)$ is determined by the sequence of binary tests along the tree.
+Symmetry reduces overfitting and yields fast evaluation.
+
+\subsection*{Categorical Features and Target Statistics}
+
+For a categorical feature $c$, CatBoost builds target statistics (TS), such as
+\[
+\text{TS}(c=v) = \mathbb{E}[y \mid c=v],
+\]
+possibly combined with prior smoothing. To avoid target leakage, CatBoost uses
+\emph{ordered boosting}: a random permutation of the dataset is fixed, and the TS
+for each row is computed using only preceding rows in the permutation. This
+makes the TS causal with respect to the ordered data and reduces bias.
+
+\subsection*{Ordered Boosting}
+
+Standard boosting can suffer from prediction shift when the same data are used
+to compute target statistics and fit the model. CatBoost mitigates this by
+building multiple permutations and averaging gradients across them. The result
+is a lower-bias estimator while preserving the efficiency of tree boosting.
+
+\subsection*{Regularization}
+
+CatBoost uses $\ell_2$ regularization on leaf values and early stopping based on
+the validation set. In this pipeline, the hyperparameter
+\texttt{l2\_leaf\_reg} controls the strength of the leaf penalty, and the best
+iteration is selected using the validation loss.
+
+\end{document}
