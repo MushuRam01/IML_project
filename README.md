@@ -12,6 +12,12 @@ company-month panel dataset.
 - testing results company wise/ : per-company plots and test metrics CSVs.
 - 194.csv : holdout company file used for standalone inference.
 
+Other folders (optional, not required to run the pipeline):
+
+- catboost_info/ : CatBoost training logs.
+- bemer/ : presentation sources and build artifacts.
+- old data/ : legacy plots and prior result exports.
+
 ## Processed data outputs
 
 After preprocessing, outputs are written to processed_data/:
