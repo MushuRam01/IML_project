@@ -90,7 +90,9 @@ All features are deterministic and depend only on past information. For example,
 
 \section{Modeling Approach}
 
+CatBoost is used as the primary baseline because it is well suited for sparse, mixed-type, and nonlinear tabular financial data. In particular, CatBoost uses ordered boosting and ordered target statistics to reduce target leakage when handling categorical features \cite{prokhorenkova2018catboost}. The method also natively handles missing values and nonlinear feature interactions, making it a strong fit for temporally ordered company-month panels.
 
+The choice to further explore residual and sequence-aware extensions was partially motivated by prior work combining gradient-boosted decision trees with temporal neural architectures for financial prediction tasks. In particular, Yu et al.\ demonstrated that CatBoost-style ensemble methods combined with LSTM-based temporal modeling could improve investment prediction performance by jointly capturing tabular structure and temporal dependencies \cite{yu2025gbdtlstm}. Motivated by this idea, we explored whether residual correction using sequence-aware models and regime-aware models could improve performance over a strong CatBoost baseline while maintaining strict chronological isolation and leakage control.
 
 CatBoost is the baseline because it is a strong tabular learner for mixed numeric and categorical financial data. Conceptually, it fits an additive model
 \begin{equation}
