@@ -232,35 +232,9 @@ Figure \ref{fig:company_overlay} zooms into company 5048 over time:
 
 \section{Diagnostics and Visual Analysis}
 
-\begin{figure}[H]
-\centering
-\includegraphics[width=0.95\textwidth]{holdout_dashboard.png}
-\caption{Holdout set diagnostics for all seven model variants. Scatter plot (top-left) shows predicted vs. actual returns; residual distribution (top-right) shows error spread per model; summary statistics table (bottom) reports median, IQR, and skewness. HMM and MLP produce tighter error distributions than baseline; Transformer is visibly dispersed.}
-\label{fig:holdout}
-\end{figure}
 
-\begin{figure}[H]
-\centering
-\includegraphics[width=0.95\textwidth]{test_dashboard.png}
-\caption{Test set dashboard for full 2022-07 to 2025-03 evaluation window. Confirms holdout ranking and shows that performance degrades gracefully outside training distribution.}
-\label{fig:test}
-\end{figure}
 
-\begin{figure}[H]
-\centering
-\includegraphics[width=0.95\textwidth]{company_5048_overlay.png}
-\caption{Company 5048 time series (representative example). Baseline CatBoost (blue), HMM correction (green), and MLP correction (orange) track actual returns (black). Corrections smooth transient overshoots without degrading fit in normal periods. Transformer (red) is too erratic, confirming instability.}
-\label{fig:company_overlay}
-\end{figure}
 
-\subsection{Architecture Comparison Metrics}
-
-\begin{figure}[H]
-\centering
-\includegraphics[width=0.90\textwidth]{company_5048_mean_rmse_by_arch.png}
-\caption{Mean RMSE by architecture on company 5048. Bar chart ranks all seven residual models by per-company error. HMM and MLP are clustered at low error; Transformer and Ridge show higher error; direct CatBoost residual falls in the middle.}
-\label{fig:rmse_by_arch}
-\end{figure}
 
 \subsection{Per-Model Deep Dives: Company 5048}
 
@@ -459,7 +433,7 @@ The Transformer significantly underperformed (RMSE: $0.2540$ vs. $0.2287$ baseli
     \item Small training set (1,600 months $\times$ 4 companies = 6,400 samples) is insufficient for stable Transformer training.
     \item Attention weights become unstable when the signal-to-noise ratio is low, causing volatile predictions.
 \end{itemize}
-\textbf{Lesson:} Sophisticated architectures require strong signals and large data. When baseline prediction is already good, residuals become harder to model, not easier.
+\textbf{Learning:} Sophisticated architectures require strong signals and large data. When baseline prediction is already good, residuals become harder to model, not easier.
 
 \subsection{Partial Success: HMM Improvements}
 HMM achieves $0.2236$ RMSE (1.3\% improvement). The modest gain is expected because:
@@ -468,7 +442,7 @@ HMM achieves $0.2236$ RMSE (1.3\% improvement). The modest gain is expected beca
     \item The improvement is statistically small, suggesting limited room for post-hoc correction.
     \item HMM training itself can be noisy on short residual sequences (48 months per company).
 \end{itemize}
-\textbf{Lesson:} Two-stage models can extract regime information, but only marginal gains are possible when the baseline is strong.
+\textbf{Learning:} Two-stage models can extract regime information, but only marginal gains are possible when the baseline is strong.
 
 \subsection{Linear Instability: Ridge and Elastic Net}
 Ridge and Elastic Net failed due to numerical issues. The residual feature matrix is ill-conditioned (high collinearity), and standard regularization could not stabilize fitting. This motivates using nonlinear (tree-based or neural) correctors.
@@ -480,21 +454,9 @@ A second-stage CatBoost model trained on residuals achieved RMSE of $0.2274$, wh
     \item The residual signal is weaker than the original return signal, giving boosting less to learn from.
     \item Second-stage trees interact poorly with first-stage trees, creating destructive interference rather than complementary correction.
 \end{itemize}
-\textbf{Lesson:} Not all residual models help. Stacking or ensembling requires that the corrector exploits a genuinely different signal source. Direct CatBoost on residuals is too similar to the baseline and adds variance without bias reduction.
+\textbf{Learning:} Not all residual models help. Stacking or ensembling requires that the corrector exploits a genuinely different signal source. Direct CatBoost on residuals is too similar to the baseline and adds variance without bias reduction.
 
-\section{Implementation and Repository Structure}
 
-The v3.1 pipeline is organized as follows:
-
-\textbf{Preprocessing:} \texttt{preprocessing/} contains scripts for feature engineering (\texttt{build\_features.py}), CatBoost dataset construction (\texttt{build\_catboost\_dataset.py}), HMM regime labeling (\texttt{build\_hmm\_regimes.py}), and residual sequence building (\texttt{build\_residual\_sequences.py}).
-
-\textbf{Training:} \texttt{training/} contains model training scripts: \texttt{train\_catboost.py}, \texttt{train\_hmm\_correction.py}, \texttt{train\_residual\_transformer.py}, and similar for MLP, CNN, Ridge, and Elastic Net.
-
-\textbf{Evaluation:} \texttt{evaluation/} contains \texttt{evaluate\_holdout.py} (runs holdout metrics), \texttt{generate\_dashboards.py} (creates visualizations), and per-company diagnostic scripts.
-
-\textbf{Pipeline entry point:} \texttt{run\_pipeline.sh} orchestrates all steps in order.
-
-All scripts are deterministic and use fixed random seeds for reproducibility.
 
 \section{Limitations}
 
