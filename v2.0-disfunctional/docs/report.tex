@@ -1,0 +1,1033 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\usepackage{setspace}
+\usepackage{hyperref}
+
+\setstretch{1.15}
+
+\title{
+Latent Representation Learning for Financial Return Forecasting \\
+\vspace{0.2cm}
+\large A Temporal Variational Autoencoder and Latent Prediction Framework
+}
+
+\author{
+Mushu
+}
+
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\tableofcontents
+
+\newpage
+
+% ============================================================
+\section{Introduction}
+% ============================================================
+
+The objective of this project is to construct a probabilistic representation-learning pipeline for forecasting future company returns from historical financial information.
+
+The central problem may be stated as follows.
+
+Suppose a company possesses a sequence of historical monthly observations consisting of:
+\[
+x_1, x_2, \dots, x_t
+\]
+where each observation:
+\[
+x_i \in \mathbb{R}^d
+\]
+contains:
+\begin{itemize}
+    \item engineered financial factors,
+    \item accounting ratios,
+    \item profitability statistics,
+    \item market variables,
+    \item missingness indicators,
+    \item and other numerical descriptors.
+\end{itemize}
+
+Given the historical sequence:
+\[
+X_{1:t}
+=
+(x_1,x_2,\dots,x_t)
+\]
+the task is to estimate:
+\[
+r_{t+1}
+\]
+where:
+\[
+r_{t+1}
+\]
+denotes the next-month gross return.
+
+The project approaches this problem through latent representation learning.
+
+Instead of directly learning:
+\[
+X_{1:t} \rightarrow r_{t+1}
+\]
+the model first learns a compressed probabilistic representation:
+\[
+X_{1:t} \rightarrow z
+\]
+and then learns:
+\[
+z \rightarrow r_{t+1}
+\]
+
+The pipeline therefore separates:
+\begin{itemize}
+    \item temporal representation learning,
+    \item from downstream financial prediction.
+\end{itemize}
+
+This architecture allows:
+\begin{itemize}
+    \item dimensionality reduction,
+    \item denoising,
+    \item latent regime discovery,
+    \item probabilistic encoding,
+    \item and modular downstream experimentation.
+\end{itemize}
+
+% ============================================================
+\section{Dataset Structure}
+% ============================================================
+
+The original dataset consists of monthly observations across multiple companies.
+
+Each row corresponds to:
+\[
+(\text{company}, \text{month})
+\]
+and contains:
+\begin{itemize}
+    \item a timestamp,
+    \item company identifier,
+    \item numerical financial features,
+    \item engineered indicators,
+    \item and the target variable.
+\end{itemize}
+
+The target variable is:
+\[
+\texttt{monthly\_gross\_return}
+\]
+which represents the multiplicative gross return over the next month.
+
+For example:
+\[
+1.05
+\]
+corresponds to a:
+\[
+5\%
+\]
+gain, while:
+\[
+0.95
+\]
+corresponds to a:
+\[
+5\%
+\]
+loss.
+
+The dataset was partitioned company-wise into separate CSV files:
+\[
+\texttt{company\_data/company\_id.csv}
+\]
+where each file contains the complete historical trajectory of a single company.
+
+Within each company:
+\begin{itemize}
+    \item rows are sorted chronologically,
+    \item timestamps are converted to monthly datetime objects,
+    \item and historical order is preserved.
+\end{itemize}
+
+% ============================================================
+\section{Preprocessing Pipeline}
+% ============================================================
+
+\subsection{Sequence Construction}
+
+The forecasting problem is transformed into a fixed-length sequence learning problem.
+
+A sequence length:
+\[
+L = 12
+\]
+months is used.
+
+For every company and every valid prediction month:
+\[
+t
+\]
+a historical sequence is constructed:
+\[
+X_t
+=
+(x_{t-L},\dots,x_{t-1})
+\]
+
+The associated prediction target is:
+\[
+y_t = r_t
+\]
+
+Thus each training example becomes:
+\[
+(X_t,y_t)
+\]
+
+The resulting tensor representation has the form:
+\[
+X
+\in
+\mathbb{R}^{N \times L \times d}
+\]
+where:
+\begin{itemize}
+    \item \(N\) is the number of sequences,
+    \item \(L=12\) is sequence length,
+    \item \(d\) is the feature dimension.
+\end{itemize}
+
+% ============================================================
+\subsection{Handling Variable-Length Histories}
+
+Some companies possess fewer than:
+\[
+12
+\]
+historical observations.
+
+Instead of discarding these companies, padded sequences are constructed.
+
+Suppose a company possesses only:
+\[
+k < L
+\]
+historical entries.
+
+Then:
+\[
+L-k
+\]
+zero-vectors are prepended.
+
+The final padded sequence therefore remains:
+\[
+L
+\]
+timesteps long.
+
+A binary mask:
+\[
+m \in \{0,1\}^L
+\]
+is simultaneously constructed where:
+\[
+m_i
+=
+\begin{cases}
+1 & \text{if timestep exists} \\
+0 & \text{if timestep is padded}
+\end{cases}
+\]
+
+This allows the reconstruction loss to ignore artificial padding.
+
+% ============================================================
+\subsection{Missing Features}
+
+Some engineered financial features are missing for certain companies or months.
+
+Rather than discarding incomplete observations:
+\begin{itemize}
+    \item missing values are filled,
+    \item missingness indicators are preserved,
+    \item and absent columns are inserted with zeros when necessary.
+\end{itemize}
+
+This preserves:
+\begin{itemize}
+    \item feature consistency,
+    \item dimensional compatibility,
+    \item and temporal continuity.
+\end{itemize}
+
+% ============================================================
+\subsection{Chronological Splitting}
+
+The dataset is partitioned chronologically:
+\begin{itemize}
+    \item training set,
+    \item validation set,
+    \item test set.
+\end{itemize}
+
+Chronological splitting is essential in financial forecasting because future information must never leak into the past.
+
+Random shuffling across time would violate causal structure.
+
+Thus:
+\[
+\text{train months}
+<
+\text{validation months}
+<
+\text{test months}
+\]
+
+% ============================================================
+\section{Temporal Variational Autoencoder}
+% ============================================================
+
+\subsection{Motivation}
+
+Financial sequences are:
+\begin{itemize}
+    \item high-dimensional,
+    \item noisy,
+    \item temporally dependent,
+    \item and partially redundant.
+\end{itemize}
+
+Directly forecasting returns from raw features can therefore be unstable.
+
+The Temporal Variational Autoencoder (TVAE) is used to learn a compressed latent representation:
+\[
+z
+\]
+that captures the underlying financial state of a company.
+
+The model learns:
+\[
+X_{1:t}
+\rightarrow
+z
+\]
+where:
+\[
+z \in \mathbb{R}^k
+\]
+with:
+\[
+k \ll dL
+\]
+
+% ============================================================
+\subsection{Encoder}
+
+The encoder consists of a Gated Recurrent Unit (GRU).
+
+Given:
+\[
+X
+=
+(x_1,\dots,x_L)
+\]
+the GRU processes the sequence recurrently:
+\[
+h_t
+=
+\text{GRU}(x_t,h_{t-1})
+\]
+
+The final hidden state:
+\[
+h_L
+\]
+summarizes the temporal dynamics of the entire sequence.
+
+Two linear projections are then applied:
+\[
+\mu = W_\mu h_L + b_\mu
+\]
+\[
+\log \sigma^2
+=
+W_\sigma h_L + b_\sigma
+\]
+
+These parameterize a Gaussian latent distribution:
+\[
+q(z|X)
+=
+\mathcal{N}(\mu,\sigma^2I)
+\]
+
+% ============================================================
+\subsection{Latent Sampling}
+
+The latent variable is sampled using the reparameterization trick:
+\[
+z
+=
+\mu
++
+\sigma \odot \epsilon
+\]
+where:
+\[
+\epsilon
+\sim
+\mathcal{N}(0,I)
+\]
+
+This formulation allows gradients to propagate through stochastic sampling.
+
+% ============================================================
+\subsection{Decoder}
+
+The decoder reconstructs the original sequence from:
+\[
+z
+\]
+
+The latent vector is projected into the GRU hidden space and repeated across timesteps.
+
+The decoder therefore attempts to learn:
+\[
+z
+\rightarrow
+\hat X
+\]
+
+The reconstructed tensor:
+\[
+\hat X
+\]
+has identical dimensions to the original sequence tensor:
+\[
+X
+\]
+
+% ============================================================
+\subsection{Loss Function}
+
+The TVAE objective consists of two components.
+
+\subsubsection{Reconstruction Loss}
+
+The reconstruction term minimizes:
+\[
+\|X-\hat X\|^2
+\]
+
+Only valid timesteps contribute to loss:
+\[
+\mathcal{L}_{\text{recon}}
+=
+\frac{1}{|M|}
+\sum
+m_t
+\|x_t-\hat x_t\|^2
+\]
+
+where:
+\[
+m_t
+\]
+is the timestep mask.
+
+% ============================================================
+\subsubsection{KL Divergence}
+
+The latent distribution is regularized toward:
+\[
+\mathcal{N}(0,I)
+\]
+
+using:
+\[
+D_{KL}
+\left(
+q(z|X)
+\|
+p(z)
+\right)
+\]
+
+which evaluates to:
+\[
+-\frac12
+\sum
+\left(
+1+\log\sigma^2-\mu^2-\sigma^2
+\right)
+\]
+
+% ============================================================
+\subsubsection{Final Objective}
+
+The complete objective becomes:
+\[
+\mathcal{L}
+=
+\mathcal{L}_{\text{recon}}
++
+\beta
+\mathcal{L}_{KL}
+\]
+
+where:
+\[
+\beta
+\]
+controls latent regularization strength.
+
+% ============================================================
+\section{Latent Representation Extraction}
+% ============================================================
+
+After TVAE training:
+\begin{itemize}
+    \item the decoder is discarded,
+    \item and only the encoder is retained.
+\end{itemize}
+
+Each sequence:
+\[
+X_i
+\]
+is encoded into:
+\[
+\mu_i
+\]
+
+The latent dataset therefore becomes:
+\[
+Z
+=
+(\mu_1,\dots,\mu_N)
+\]
+
+where:
+\[
+Z
+\in
+\mathbb{R}^{N\times k}
+\]
+
+This latent space represents:
+\begin{itemize}
+    \item compressed financial states,
+    \item temporal dynamics,
+    \item and learned regime structure.
+\end{itemize}
+
+% ============================================================
+\section{Latent Prediction Network}
+% ============================================================
+
+\subsection{MLP Predictor}
+
+A Multi-Layer Perceptron (MLP) is trained on latent vectors.
+
+The predictor learns:
+\[
+z
+\rightarrow
+\hat r_{t+1}
+\]
+
+The architecture consists of:
+\begin{itemize}
+    \item fully connected layers,
+    \item ReLU nonlinearities,
+    \item dropout regularization,
+    \item and scalar regression output.
+\end{itemize}
+
+The network minimizes Mean Squared Error:
+\[
+\mathcal{L}_{\text{pred}}
+=
+\frac1N
+\sum
+(\hat r_i-r_i)^2
+\]
+
+% ============================================================
+\section{Inference Pipeline}
+% ============================================================
+
+During inference:
+\begin{enumerate}
+    \item a company CSV file is loaded,
+    \item rows are sorted chronologically,
+    \item the most recent:
+    \[
+    12
+    \]
+    months are extracted,
+    \item missing columns are inserted if necessary,
+    \item the sequence is padded if required,
+    \item the TVAE encoder computes:
+    \[
+    z
+    \]
+    \item the predictor computes:
+    \[
+    \hat r_{t+1}
+    \]
+\end{enumerate}
+
+Thus the deployed forecasting system performs:
+\[
+X_{1:t}
+\rightarrow
+z
+\rightarrow
+\hat r_{t+1}
+\]
+
+% ============================================================
+\section{Downstream Predictive Models}
+% ============================================================
+
+After latent representations are extracted from the Temporal Variational Autoencoder, downstream predictive models are trained to estimate future company returns.
+
+The latent dataset consists of vectors:
+\[
+z_i \in \mathbb{R}^k
+\]
+where:
+\[
+k = 32
+\]
+in the current implementation.
+
+Each:
+\[
+z_i
+\]
+represents a compressed latent financial state derived from:
+\[
+12
+\]
+months of historical company information.
+
+The downstream learning problem therefore becomes:
+\[
+z_i
+\rightarrow
+r_{i+1}
+\]
+
+Two separate predictive architectures are explored:
+\begin{enumerate}
+    \item Multi-Layer Perceptron Predictor
+    \item Latent Transformer Predictor
+\end{enumerate}
+
+Both models operate on the exact same latent representation space.
+
+This allows the comparison to isolate:
+\begin{itemize}
+    \item the effect of downstream architecture,
+    \item independent of representation learning.
+\end{itemize}
+
+% ============================================================
+\subsection{Latent MLP Predictor}
+% ============================================================
+
+The first downstream predictor is a standard Multi-Layer Perceptron (MLP).
+
+The objective of the MLP is:
+\[
+f_\theta :
+\mathbb{R}^k
+\rightarrow
+\mathbb{R}
+\]
+
+where:
+\[
+f_\theta(z_i)
+=
+\hat r_{i+1}
+\]
+
+The network consists of:
+\begin{itemize}
+    \item fully connected linear layers,
+    \item ReLU activation functions,
+    \item dropout regularization,
+    \item scalar regression output.
+\end{itemize}
+
+The architecture used in the implementation is:
+
+\[
+32
+\rightarrow
+128
+\rightarrow
+128
+\rightarrow
+1
+\]
+
+The forward computation may be written as:
+\[
+h_1
+=
+\phi(W_1 z + b_1)
+\]
+
+\[
+h_2
+=
+\phi(W_2 h_1 + b_2)
+\]
+
+\[
+\hat r
+=
+W_3 h_2 + b_3
+\]
+
+where:
+\begin{itemize}
+    \item \(\phi\) denotes the ReLU nonlinearity,
+    \item \(h_1,h_2\) are hidden activations.
+\end{itemize}
+
+The MLP does not model temporal dynamics directly.
+
+Instead:
+\begin{itemize}
+    \item temporal structure is assumed to already exist within the latent representation:
+    \[
+    z
+    \]
+    produced by the TVAE encoder.
+\end{itemize}
+
+Thus the MLP learns:
+\[
+z
+\rightarrow
+\hat r_{t+1}
+\]
+
+rather than:
+\[
+X_{1:t}
+\rightarrow
+\hat r_{t+1}
+\]
+
+This architecture serves as:
+\begin{itemize}
+    \item a baseline latent predictor,
+    \item a latent-space regression model,
+    \item and a representation-quality benchmark.
+\end{itemize}
+
+% ============================================================
+\subsection{Latent Transformer Predictor}
+% ============================================================
+
+A second downstream architecture uses self-attention over latent representations.
+
+Unlike traditional transformers operating on raw temporal sequences, the transformer in this project operates on:
+\[
+z
+\]
+directly.
+
+The key observation is:
+\begin{itemize}
+    \item the Temporal VAE already models temporal dependencies using recurrent encoding,
+    \item therefore the transformer is used to model latent interaction structure rather than temporal ordering.
+\end{itemize}
+
+% ============================================================
+\subsubsection{Latent Tokenization}
+
+The latent vector:
+\[
+z
+\in
+\mathbb{R}^{32}
+\]
+is reshaped into:
+\[
+8
+\]
+tokens of dimension:
+\[
+4
+\]
+
+Thus:
+\[
+z
+\rightarrow
+(z_1,z_2,\dots,z_8)
+\]
+where:
+\[
+z_i
+\in
+\mathbb{R}^4
+\]
+
+This produces a latent token sequence:
+\[
+Z
+\in
+\mathbb{R}^{8\times4}
+\]
+
+The intuition is that:
+\begin{itemize}
+    \item different subspaces of the latent representation may encode different financial factors,
+    \item and self-attention may learn interactions between these latent components.
+\end{itemize}
+
+% ============================================================
+\subsubsection{Token Projection}
+
+Each latent token is projected into a higher-dimensional embedding space:
+\[
+e_i
+=
+W_p z_i + b_p
+\]
+
+where:
+\[
+e_i
+\in
+\mathbb{R}^{d_h}
+\]
+
+and:
+\[
+d_h = 64
+\]
+in the implementation.
+
+Learnable positional embeddings are added:
+\[
+\tilde e_i
+=
+e_i + p_i
+\]
+
+even though the latent tokens are not temporal positions.
+
+The positional embeddings instead provide:
+\begin{itemize}
+    \item latent token identity,
+    \item latent subspace indexing,
+    \item and structured attention ordering.
+\end{itemize}
+
+% ============================================================
+\subsubsection{Self-Attention}
+
+The transformer encoder applies multi-head self-attention:
+\[
+\text{Attention}(Q,K,V)
+=
+\text{softmax}
+\left(
+\frac{QK^\top}{\sqrt d}
+\right)V
+\]
+
+where:
+\[
+Q,K,V
+\]
+are learned projections of latent token embeddings.
+
+Self-attention allows the model to learn:
+\begin{itemize}
+    \item latent factor dependencies,
+    \item nonlinear latent interactions,
+    \item importance weighting between latent subspaces.
+\end{itemize}
+
+Multiple transformer encoder layers are stacked.
+
+The implementation uses:
+\begin{itemize}
+    \item \(2\) attention heads,
+    \item \(2\) encoder layers.
+\end{itemize}
+
+% ============================================================
+\subsubsection{Pooling and Prediction}
+
+After transformer encoding:
+\[
+H
+=
+(h_1,\dots,h_8)
+\]
+
+global average pooling is applied:
+\[
+\bar h
+=
+\frac18
+\sum_{i=1}^8
+h_i
+\]
+
+The pooled representation:
+\[
+\bar h
+\]
+is passed through a regression head:
+\[
+\bar h
+\rightarrow
+\hat r_{t+1}
+\]
+
+This produces the final return prediction.
+
+% ============================================================
+\subsection{Training Objective}
+% ============================================================
+
+Both downstream predictors minimize Mean Squared Error:
+\[
+\mathcal{L}_{\text{pred}}
+=
+\frac1N
+\sum_{i=1}^N
+(\hat r_i-r_i)^2
+\]
+
+Optimization is performed using Adam.
+
+Validation loss is monitored across epochs and training logs are stored for reproducibility.
+
+% ============================================================
+\subsection{Model Comparison}
+% ============================================================
+
+The primary purpose of using both predictors is to compare:
+\begin{itemize}
+    \item simple latent regression,
+    \item against attention-enhanced latent interaction modeling.
+\end{itemize}
+
+Since both models operate on identical latent representations:
+\[
+z
+\]
+performance differences can be attributed primarily to:
+\begin{itemize}
+    \item downstream predictive architecture,
+    \item rather than representation learning itself.
+\end{itemize}
+
+This establishes a controlled experimental framework for evaluating:
+\begin{itemize}
+    \item latent-space predictive quality,
+    \item attention usefulness,
+    \item and representation structure.
+\end{itemize}
+
+
+% ============================================================
+\section{Evaluation}
+% ============================================================
+
+Model performance is evaluated using:
+\begin{itemize}
+    \item Mean Squared Error,
+    \item Mean Absolute Error,
+    \item directional accuracy,
+    \item correlation between predictions and targets.
+\end{itemize}
+
+Directional accuracy evaluates:
+\[
+\text{sign}(\hat r_t)
+=
+\text{sign}(r_t)
+\]
+
+which is financially important because:
+\begin{itemize}
+    \item predicting movement direction
+    is often more useful than exact magnitude.
+\end{itemize}
+
+% ============================================================
+\section{Future Work}
+% ============================================================
+
+Future extensions include:
+\begin{itemize}
+    \item latent transformers,
+    \item hierarchical latent representations,
+    \item volatility-aware objectives,
+    \item probabilistic forecasting,
+    \item attention-based latent interaction models,
+    \item and reinforcement-learning trading policies.
+\end{itemize}
+
+The latent transformer extension specifically aims to model:
+\[
+z
+\]
+as a structured representation containing interacting latent financial factors.
+
+% ============================================================
+\section{Conclusion}
+% ============================================================
+
+This project constructs a complete representation-learning pipeline for financial return forecasting.
+
+The framework:
+\begin{itemize}
+    \item preprocesses temporal company data,
+    \item constructs chronological sequence tensors,
+    \item learns probabilistic latent financial states,
+    \item and performs downstream return prediction.
+\end{itemize}
+
+The architecture separates:
+\begin{itemize}
+    \item temporal representation learning,
+    \item from predictive modeling.
+\end{itemize}
+
+This modularity enables:
+\begin{itemize}
+    \item systematic experimentation,
+    \item latent-space analysis,
+    \item and downstream model comparison.
+\end{itemize}
+
+\end{document}

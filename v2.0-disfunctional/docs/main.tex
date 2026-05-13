@@ -1,0 +1,535 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{graphicx}
+\usepackage{enumitem}
+
+\title{Initial Overview for Implementation:\\
+Temporal Variational Autoencoder and Attention-Based Transformer for Sequential Equity Return Prediction}
+
+\author{Aarush Ram Anandh}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\tableofcontents
+
+\newpage
+
+\section{Problem Definition}
+
+We are given panel time-series financial data consisting of multiple companies observed across multiple months.
+
+Each observation contains:
+\begin{itemize}
+    \item company identifier
+    \item timestamp
+    \item accounting variables
+    \item market variables
+    \item engineered financial factors
+    \item lagged historical statistics
+\end{itemize}
+
+The objective is to predict the next-month gross return for a company using its complete historical trajectory up to the current month.
+
+Formally, for company $i$:
+
+\[
+(X_{i,1}, X_{i,2}, \dots, X_{i,t})
+\rightarrow
+r_{i,t+1}
+\]
+
+where:
+\begin{itemize}
+    \item $X_{i,t}$ denotes the feature vector at month $t$
+    \item $r_{i,t+1}$ denotes the next-month gross return
+\end{itemize}
+
+The model therefore learns a sequential mapping rather than an independent row-wise regression function.
+
+\section{Dataset Structure}
+
+Each row in the dataset corresponds to:
+
+\[
+(\text{company}, \text{month}, \text{features})
+\]
+
+Example feature groups include:
+\begin{itemize}
+    \item market capitalization
+    \item price
+    \item book-to-market ratio
+    \item profitability
+    \item investment factor
+    \item lagged returns
+    \item momentum
+    \item accounting statistics
+\end{itemize}
+
+The dataset is therefore:
+\begin{itemize}
+    \item multivariate
+    \item temporal
+    \item panel structured
+\end{itemize}
+
+\section{Data Preprocessing}
+
+\subsection{Chronological Sorting}
+
+For every company:
+
+\[
+D_i =
+\{
+(X_{i,1}, r_{i,1}),
+(X_{i,2}, r_{i,2}),
+\dots,
+(X_{i,T_i}, r_{i,T_i})
+\}
+\]
+
+the observations must be sorted chronologically.
+
+\subsection{Target Construction}
+
+The prediction target is the next-month return.
+
+For every timestep:
+
+\[
+y_{i,t} = r_{i,t+1}
+\]
+
+Thus:
+\begin{itemize}
+    \item input uses information available at time $t$
+    \item target corresponds to month $t+1$
+\end{itemize}
+
+\subsection{Sequence Construction}
+
+A fixed rolling window of length $L$ is used.
+
+For example, if:
+\[
+L = 12
+\]
+
+then each training sample becomes:
+
+\[
+S_{i,t}
+=
+(X_{i,t-11},
+X_{i,t-10},
+\dots,
+X_{i,t})
+\]
+
+with target:
+
+\[
+y_{i,t} = r_{i,t+1}
+\]
+
+Thus:
+\[
+S_{i,t} \in \mathbb{R}^{L \times d}
+\]
+
+where:
+\begin{itemize}
+    \item $L$ is sequence length
+    \item $d$ is feature dimension
+\end{itemize}
+
+\subsection{Sliding Window Construction}
+
+The rolling window slides across time.
+
+Example:
+
+\[
+(X_1,\dots,X_{12}) \rightarrow r_{13}
+\]
+
+\[
+(X_2,\dots,X_{13}) \rightarrow r_{14}
+\]
+
+\[
+(X_3,\dots,X_{14}) \rightarrow r_{15}
+\]
+
+This converts the panel dataset into a supervised sequential learning dataset.
+
+\section{Train / Validation / Test Split}
+
+Random splitting must never be used because it causes temporal leakage.
+
+Instead, chronological splitting is performed.
+
+Example:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Split & Time Range \\
+\midrule
+Training & 2000 -- 2018 \\
+Validation & 2019 -- 2021 \\
+Testing & 2022 -- 2025 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+This ensures:
+\begin{itemize}
+    \item the model never sees future data during training
+    \item evaluation remains realistic
+    \item deployment conditions are preserved
+\end{itemize}
+
+\section{Feature Normalization}
+
+Financial variables have different scales.
+
+Examples:
+\begin{itemize}
+    \item market capitalization may be extremely large
+    \item momentum may be centered near zero
+    \item profitability ratios may contain small decimals
+\end{itemize}
+
+Normalization is therefore required.
+
+For each feature:
+
+\[
+x' =
+\frac{x - \mu}{\sigma}
+\]
+
+where:
+\begin{itemize}
+    \item $\mu$ is training mean
+    \item $\sigma$ is training standard deviation
+\end{itemize}
+
+Important:
+\begin{itemize}
+    \item normalization statistics must be computed only on training data
+    \item validation and test sets must reuse training statistics
+\end{itemize}
+
+\section{Categorical Features}
+
+Categorical labels such as:
+\begin{itemize}
+    \item momentum labels
+    \item size labels
+    \item book-to-market labels
+\end{itemize}
+
+must be encoded numerically.
+
+Possible methods:
+\begin{itemize}
+    \item one-hot encoding
+    \item learned embeddings
+\end{itemize}
+
+Embedding layers are preferred for transformer architectures.
+
+\section{Temporal Variational Autoencoder}
+
+\subsection{Objective}
+
+The Temporal VAE learns compressed latent representations of historical financial sequences.
+
+Instead of directly predicting returns, the model first learns a latent state:
+
+\[
+z_t
+=
+f(X_{1:t})
+\]
+
+The latent vector should capture:
+\begin{itemize}
+    \item market regimes
+    \item momentum structure
+    \item volatility patterns
+    \item long-term financial behavior
+\end{itemize}
+
+\subsection{Encoder}
+
+The encoder receives the sequence:
+
+\[
+S_{i,t}
+=
+(X_{i,t-L+1}, \dots, X_{i,t})
+\]
+
+and produces:
+
+\[
+q_\phi(z|S)
+=
+\mathcal{N}(\mu, \sigma^2)
+\]
+
+The encoder outputs:
+\begin{itemize}
+    \item latent mean $\mu$
+    \item latent variance $\sigma^2$
+\end{itemize}
+
+\subsection{Latent Sampling}
+
+Using the reparameterization trick:
+
+\[
+z = \mu + \sigma \odot \epsilon
+\]
+
+where:
+
+\[
+\epsilon \sim \mathcal{N}(0, I)
+\]
+
+\subsection{Decoder}
+
+The decoder reconstructs the original sequence:
+
+\[
+\hat S = g_\theta(z)
+\]
+
+The objective is to preserve sequential structure inside the latent space.
+
+\subsection{Loss Function}
+
+The VAE minimizes:
+
+\[
+\mathcal{L}
+=
+\mathcal{L}_{recon}
++
+\beta D_{KL}(q(z|x)\|p(z))
+\]
+
+where:
+\begin{itemize}
+    \item reconstruction loss preserves information
+    \item KL divergence regularizes latent space
+\end{itemize}
+
+Typical reconstruction loss:
+
+\[
+\mathcal{L}_{recon}
+=
+\|S - \hat S\|^2
+\]
+
+\section{Transformer Forecasting Model}
+
+\subsection{Objective}
+
+The transformer predicts next-month return from temporal latent representations.
+
+Input:
+
+\[
+(z_1, z_2, \dots, z_t)
+\]
+
+Output:
+
+\[
+\hat r_{t+1}
+\]
+
+\subsection{Positional Encoding}
+
+Transformers do not naturally understand temporal order.
+
+Therefore positional encodings are added:
+
+\[
+h_t = z_t + p_t
+\]
+
+where:
+\begin{itemize}
+    \item $z_t$ is latent representation
+    \item $p_t$ is temporal positional encoding
+\end{itemize}
+
+\subsection{Self-Attention}
+
+Attention computes relationships between months.
+
+For query $Q$, key $K$, and value $V$:
+
+\[
+\text{Attention}(Q,K,V)
+=
+\text{softmax}
+\left(
+\frac{QK^T}{\sqrt{d_k}}
+\right)V
+\]
+
+This allows the model to learn:
+\begin{itemize}
+    \item long-range dependencies
+    \item regime persistence
+    \item historical relevance
+\end{itemize}
+
+\subsection{Prediction Head}
+
+The final transformer representation:
+
+\[
+h_t
+\]
+
+is passed into a regression head:
+
+\[
+\hat r_{t+1}
+=
+W h_t + b
+\]
+
+\section{Training Pipeline}
+
+\subsection{Step 1: Sequence Generation}
+
+Construct rolling windows for every company.
+
+Output tensor:
+
+\[
+X \in \mathbb{R}^{N \times L \times d}
+\]
+
+where:
+\begin{itemize}
+    \item $N$ = number of training samples
+    \item $L$ = sequence length
+    \item $d$ = feature dimension
+\end{itemize}
+
+\subsection{Step 2: Train Temporal VAE}
+
+The VAE is trained first.
+
+Objective:
+\begin{itemize}
+    \item compress sequences
+    \item learn smooth latent manifold
+\end{itemize}
+
+Output:
+\[
+z_t
+\]
+
+for every sequence.
+
+\subsection{Step 3: Transformer Training}
+
+Latent sequences are fed into the transformer.
+
+Objective:
+\[
+\hat r_{t+1}
+\approx
+r_{t+1}
+\]
+
+Typical regression loss:
+
+\[
+\mathcal{L}_{pred}
+=
+(r_{t+1} - \hat r_{t+1})^2
+\]
+
+\section{Inference Procedure}
+
+At inference time:
+
+\begin{enumerate}
+    \item collect most recent $L$ months
+    \item normalize using training statistics
+    \item encode sequence using VAE encoder
+    \item obtain latent sequence
+    \item feed latent sequence into transformer
+    \item predict next-month return
+\end{enumerate}
+
+Mathematically:
+
+\[
+(X_{t-L+1}, \dots, X_t)
+\rightarrow
+(z_{t-L+1}, \dots, z_t)
+\rightarrow
+\hat r_{t+1}
+\]
+
+\section{Evaluation Metrics}
+
+Possible evaluation metrics include:
+
+\begin{itemize}
+    \item Mean Squared Error
+    \item Mean Absolute Error
+    \item Directional Accuracy
+    \item Rank Correlation
+    \item Sharpe Ratio
+\end{itemize}
+
+Financial prediction quality is often more dependent on ranking quality than raw numerical precision.
+
+\section{Expected Research Contributions}
+
+The project investigates whether:
+\begin{itemize}
+    \item latent temporal representations improve forecasting
+    \item transformers capture long-range financial dependencies
+    \item attention mechanisms improve interpretability
+    \item probabilistic latent modeling stabilizes prediction
+\end{itemize}
+
+\section{Future Extensions}
+
+Possible future directions:
+\begin{itemize}
+    \item regime-aware transformers
+    \item graph neural networks across companies
+    \item reinforcement learning portfolio allocation
+    \item diffusion-based financial sequence generation
+    \item contrastive representation learning
+\end{itemize}
+
+\end{document}

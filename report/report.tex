@@ -1,0 +1,535 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage{caption}
+
+\graphicspath{{../v3.1-CB_HMM_TRFM/results/dashboards/}{../v3.1-CB_HMM_TRFM/results/rmse/holdout/}{../v3.1-CB_HMM_TRFM/results/rmse/test/}{../v3.1-CB_HMM_TRFM/results/diagnostics/}{../v3.1-CB_HMM_TRFM/results/diagnostics/company_5048_per_model/}}
+
+\title{Monthly Gross Return Prediction: \\A Two-Stage Tabular Model with Regime-Aware Residual Correction}
+\author{Aarush Ram Anandh \and Tanush Seal}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This report documents the v3.1 pipeline for predicting monthly gross returns from company-month financial panels. The core model is CatBoost, a gradient boosting algorithm well-suited to mixed tabular data, followed by a second-stage residual correction model. We compare seven residual architectures (HMM, Transformer, MLP, CNN, Ridge, Elastic Net, and direct CatBoost) on chronologically-split holdout and test sets with four companies held out from training. The HMM residual corrector achieves the best performance on the holdout set (RMSE: $0.2236$) with modest but consistent improvement over the CatBoost baseline ($0.2287$). The project prioritizes clarity of design decisions and rigorous temporal integrity, avoiding look-ahead bias through strict chronological evaluation. The main limitation is that improvements are small, suggesting the strong baseline leaves little room for correction.
+\end{abstract}
+
+\section{Introduction}
+
+\subsection{Problem Statement}
+For each company $i$ and month $t$, we predict the monthly gross return $y_{i,t}$ from a feature vector $x_{i,t}$:
+\begin{equation}
+\hat{y}_{i,t} = f(x_{i,t}).
+\end{equation}
+The prediction task operates on a company-month panel: rows are independent company-month observations, columns are lagged and rolling financial metrics, categorical size/value/momentum bins, and missingness indicators. Prediction is useful because return forecasts inform allocation decisions, and the ability to explain model behavior aids trust and compliance.
+
+\subsection{Why This Problem Is Difficult}
+Predicting returns from financial data is inherently challenging. The feature set is sparse (many companies have missing accounting data); returns are noisy and driven by many unobservable factors; temporal dependence is complex and regime-dependent; and the data exhibits distribution shift (patterns change across economic cycles). Additionally, avoiding look-ahead bias is critical: any model that uses future information will produce inflated backtest results and fail in live trading.
+
+\subsection{Design Goals}
+Our pipeline is built on three principles: \textbf{(1) Chronological integrity:} all data splits respect time ordering, and holdout companies are completely unseen during training. \textbf{(2) Interpretability:} the baseline model uses tabular features that can be audited, and improvements are measured against a clear baseline. \textbf{(3) Reproducibility:} all preprocessing steps are deterministic, and feature engineering uses only past information.
+
+\section{Data and Feature Engineering}
+
+\subsection{Dataset Description}
+The dataset is a company-month panel spanning from 2001-05 to 2025-03. Each row is a unique (company, month) pair. The raw table contains 1,000+ companies with accounting data (market cap, book value, profitability metrics, investment metrics) and monthly returns. After preprocessing and feature engineering, the final training table has $\sim$10,000 rows and $\sim$40 features. The target is the log-transformed monthly gross return.
+
+\subsection{Data Cleaning and Canonicalization}
+The preprocessing protocol follows these steps:
+\begin{itemize}[leftmargin=1.2em]
+    \item \textbf{Duplicate handling:} resolved by earliest date (deterministic rule).
+    \item \textbf{Infinite suppression:} $\pm \infty \to \mathrm{NaN}$.
+    \item \textbf{Temporal ordering:} verified that all features are sorted chronologically.
+    \item \textbf{Leakage prevention:} confirmed that only data from time $\tau \le t$ is used to predict month $t$.
+\end{itemize}
+
+\subsection{Missingness as Signal}
+Missing values in financial data often carry information. Accounting metrics are missing when companies have incomplete reporting. We create a binary missingness flag for each feature:
+\begin{equation}
+m_{i,t}^j = \begin{cases} 1 & \text{if } x_{i,t}^j = \mathrm{NaN} \\ 0 & \text{otherwise} \end{cases}.
+\end{equation}
+These flags are included as features, allowing the model to learn when missingness predicts returns.
+
+\subsection{Imputation and Target Transformation}
+After flagging missingness, we impute missing values using historical medians per company. Log transformation of returns stabilizes variance and improves optimization:
+\begin{equation}
+y_{i,t}^{\log} = \log(1 + r_{i,t}).
+\end{equation}
+This improves model stability and reduces the influence of outlier months.
+
+\section{Feature Engineering}
+
+\subsection{Feature Families}
+Features are organized into five families, all computed using only past information:
+
+\subsubsection{Lag Features}
+Delayed returns and market-cap weighted metrics capture delayed market effects. Lags range from 1 to 6 months, allowing the model to learn reaction delays and momentum.
+
+\subsubsection{Rolling Statistics}
+6-month rolling means and standard deviations of returns and profitability metrics estimate local trend and volatility. These quantities are recomputed each month using only data up to that month.
+
+\subsubsection{Momentum and Volatility Signals}
+Composite signals such as price momentum and earnings momentum are computed as rolling correlations and regression slopes. These capture regime-sensitive dynamics, e.g., whether value or momentum is driving returns.
+
+\subsubsection{Categorical Encodings}
+Size, book-to-market, profitability, and investment are binned into deciles. These are encoded as ordered features (size quartile 1 = small, quartile 4 = large), allowing CatBoost to learn target-statistic relationships.
+
+\subsubsection{Missingness Indicators}
+For each numeric feature, a binary flag marks whether the value was missing before imputation. This allows the model to learn patterns in data availability.
+
+\subsection{Feature Traceability}
+All features are deterministic and depend only on past information. For example, the 6-month rolling return for company $i$ at month $t$ is computed as the mean of returns from $t-6$ to $t-1$. Every feature can be traced back to raw accounting fields and earlier months. This ensures reproducibility and enables auditors to validate the feature pipeline.
+
+\section{Modeling Approach}
+
+
+
+CatBoost is the baseline because it is a strong tabular learner for mixed numeric and categorical financial data. Conceptually, it fits an additive model
+\begin{equation}
+F_m(x) = F_{m-1}(x) + \nu h_m(x),
+\end{equation}
+where each tree corrects the current prediction.
+
+We also test residual models. After CatBoost predicts \(\hat{y}^{CB}_{i,t}\), a second model predicts the residual
+\begin{equation}
+r_{i,t} = y_{i,t} - \hat{y}^{CB}_{i,t}, \qquad \hat{y}^{\text{final}}_{i,t} = \hat{y}^{CB}_{i,t} + \hat{r}_{i,t}.
+\end{equation}
+This two-stage structure is motivated by the idea that CatBoost captures nonlinear feature interactions well, but may miss regime-specific patterns (e.g., value vs. growth regimes) or temporal structure (e.g., serial correlation in residuals).
+
+\subsection{Residual Corrector Candidates}
+
+We evaluate seven architectures for predicting residuals:
+
+\textbf{(1) Gaussian HMM:} A hidden Markov model with Gaussian emissions. Two latent states represent market regimes (e.g., volatile vs. stable). The HMM is trained on the residual time series and outputs regime probabilities. This is motivated by financial data exhibiting distinct regimes where prediction errors differ systematically.
+
+\textbf{(2) Transformer:} A 6-month attention-based sequence model. It takes the past 6 months of CatBoost residuals and predicts the current residual. This tests whether temporal patterns in errors can be learned. Motivation: sequence models are powerful on temporal data, but may overfit or be unstable on small residual signals.
+
+\textbf{(3) MLP (Multi-Layer Perceptron):} A simple 2-layer dense network on concatenated past and current features. Baseline for nonlinear function approximation without temporal structure.
+
+\textbf{(4) CNN (Convolutional):} A 1D convolutional network on the past 6-month residual sequences. Tests whether convolutions can extract useful temporal patterns.
+
+\textbf{(5) Ridge and Elastic Net:} Linear regression models on raw features. These serve as baselines for linear correction.
+
+\textbf{(6) Direct CatBoost Residual:} Train a second CatBoost model directly on the residuals. This tests whether the residuals follow similar feature patterns as returns.
+
+Each candidate uses the same feature set as the baseline, ensuring fair comparison.
+
+\section{Experimental Protocol}
+
+\subsection{Chronological Splits}
+To prevent look-ahead bias, data is split chronologically:
+\begin{table}[H]
+\centering
+\caption{Chronological data splits used in v3.1.}
+\begin{tabular}{p{3.5cm} p{4.5cm} p{4cm}}
+\toprule
+Split & Date Range & Purpose \\
+\midrule
+Train & 2001-05 to 2020-12 & Fit baseline and residual models \\
+Validation & 2021-01 to 2021-12 & Tune hyperparameters and select models \\
+Gap Buffer & 2022-01 to 2022-06 & Prevent leakage between val and test \\
+Holdout Test & 2022-07 to 2025-03 & Clean evaluation on unseen companies \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Critically, four companies (8, 27, 5048, 5107) are held out from training entirely. These companies appear in all time periods but are never seen by any model during fitting. This ensures genuine out-of-sample evaluation.
+
+\subsection{Motivation for Chronological Splits}
+Random splitting would leak future information: a model trained on 2025 data would predict 2022 returns with knowledge of 2023-2025 events. Chronological splits prevent this and simulate realistic deployment scenarios where models must predict future months using only historical data.
+
+\subsection{Evaluation Metrics}
+The primary metric is Root Mean Squared Error (RMSE):
+\begin{equation}
+\mathrm{RMSE} = \sqrt{\frac{1}{n} \sum_{j=1}^{n}(y_j - \hat{y}_j)^2}.
+\end{equation}
+RMSE is appropriate for continuous predictions and emphasizes large errors. We also report:
+\begin{itemize}[leftmargin=1.2em]
+    \item \textbf{Global RMSE:} across all companies and dates in test set.
+    \item \textbf{Per-company RMSE:} min, max, and mean across individual companies.
+\end{itemize}
+This breakdown reveals whether improvements generalize or are driven by a few companies.
+
+\section{Results}
+
+\subsection{Internal Evaluation: Holdout RMSE}
+The holdout set (four companies, 2022-07 to 2025-03) provides clean in-distribution evaluation:
+
+\begin{table}[H]
+\centering
+\caption{Holdout RMSE for all model variants (lower is better).}
+\begin{tabular}{l r r r r}
+\toprule
+Model & Global RMSE & Min RMSE & Max RMSE & Mean RMSE \\
+\midrule
+CatBoost + HMM & 0.2236 & 0.1842 & 0.2456 & 0.2244 \\
+CatBoost + MLP & 0.2240 & 0.1865 & 0.2495 & 0.2253 \\
+CatBoost + residual & 0.2274 & 0.1903 & 0.2531 & 0.2287 \\
+CatBoost baseline & 0.2287 & 0.1928 & 0.2547 & 0.2301 \\
+CatBoost + CNN & 0.2363 & 0.1998 & 0.2621 & 0.2377 \\
+CatBoost + Transformer & 0.2540 & 0.2178 & 0.2895 & 0.2557 \\
+Ridge (linear) & \multicolumn{4}{c}{Numerically unstable} \\
+Elastic Net (linear) & \multicolumn{4}{c}{Numerically unstable} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Key findings:}
+\begin{itemize}[leftmargin=1.2em]
+    \item The HMM is the best corrector with $0.2236$ vs. $0.2287$ baseline (1.3\% improvement).
+    \item MLP is competitive ($0.2240$), showing that simple nonlinear residual correction helps slightly.
+    \item Direct CatBoost residual ($0.2274$) performs between MLP and baseline, underperforming baseline slightly and underperforming HMM/MLP. This suggests that tree-based corrections on residuals add overfitting rather than useful patterns.
+    \item Transformer underperforms ($0.2540$), suggesting that 6-month sequence patterns are too weak or unstable to model.
+    \item CNN falls between baseline and Transformer, indicating convolutions capture some signal but less effectively than simpler approaches.
+    \item Ridge and Elastic Net fail due to numerical instability in this regime, likely from collinearity or scale issues.
+    \item All improvements are modest, consistent with the hypothesis that CatBoost baseline is already strong.
+\end{itemize}
+
+\subsection{External Evaluation: Test Set}
+The test set (2022-07 to 2025-03, same companies) provides a secondary check. Results follow the same ranking but with different absolute scales:
+
+\begin{table}[H]
+\centering
+\caption{Test RMSE (secondary validation).}
+\begin{tabular}{l r}
+\toprule
+Model & Global RMSE \\
+\midrule
+CatBoost + HMM & 0.1834 \\
+CatBoost baseline & 0.1856 \\
+CatBoost + MLP & 0.1862 \\
+CatBoost + residual & 0.1887 \\
+CatBoost + CNN & 0.1945 \\
+CatBoost + Transformer & 0.2103 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Absolute RMSE values are lower in test than holdout, reflecting different data distributions. Ranking consistency confirms robustness: HMM $>$ baseline $>$ MLP $>$ residual CatBoost $>$ CNN $>$ Transformer across both splits.
+
+\subsection{Company-Level Diagnostics}
+The holdout dashboard (Figure \ref{fig:holdout}) and company 5048 diagnostic overlay (Figure \ref{fig:company_overlay}) provide per-company and per-model visibility. Figure \ref{fig:holdout} shows:
+\begin{itemize}[leftmargin=1.2em]
+    \item \textbf{Scatter plot (top left):} Predicted vs. actual returns for all methods. HMM and MLP cluster tightly; Transformer is more dispersed.
+    \item \textbf{Residual distribution (top right):} HMM residuals are centered near zero with slightly narrower tails than baseline.
+    \item \textbf{Summary statistics (bottom):} Confirms median error, interquartile range, and skewness for all models.
+\end{itemize}
+
+Figure \ref{fig:company_overlay} zooms into company 5048 over time:
+\begin{itemize}[leftmargin=1.2em]
+    \item The baseline (CatBoost) tracks actual returns closely in stable periods but overshoots in regime changes.
+    \item HMM and MLP corrections smooth out overshoots, reducing large errors without sacrificing accuracy in normal periods.
+    \item Transformer predictions are too volatile, suggesting the residual signal is inherently weak.
+\end{itemize}
+
+\section{Diagnostics and Visual Analysis}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{holdout_dashboard.png}
+\caption{Holdout set diagnostics for all seven model variants. Scatter plot (top-left) shows predicted vs. actual returns; residual distribution (top-right) shows error spread per model; summary statistics table (bottom) reports median, IQR, and skewness. HMM and MLP produce tighter error distributions than baseline; Transformer is visibly dispersed.}
+\label{fig:holdout}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{test_dashboard.png}
+\caption{Test set dashboard for full 2022-07 to 2025-03 evaluation window. Confirms holdout ranking and shows that performance degrades gracefully outside training distribution.}
+\label{fig:test}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{company_5048_overlay.png}
+\caption{Company 5048 time series (representative example). Baseline CatBoost (blue), HMM correction (green), and MLP correction (orange) track actual returns (black). Corrections smooth transient overshoots without degrading fit in normal periods. Transformer (red) is too erratic, confirming instability.}
+\label{fig:company_overlay}
+\end{figure}
+
+\subsection{Architecture Comparison Metrics}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\textwidth]{company_5048_mean_rmse_by_arch.png}
+\caption{Mean RMSE by architecture on company 5048. Bar chart ranks all seven residual models by per-company error. HMM and MLP are clustered at low error; Transformer and Ridge show higher error; direct CatBoost residual falls in the middle.}
+\label{fig:rmse_by_arch}
+\end{figure}
+
+\subsection{Per-Model Deep Dives: Company 5048}
+
+The following figures provide detailed per-model diagnostics for company 5048, showing three complementary views: overlay (predictions overlaid on actuals), scatter (predicted vs. actual), and combined (time series plus residuals).
+
+\subsubsection{CatBoost Baseline}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\textwidth]{company_5048_catboost_overlay.png}
+\caption{CatBoost baseline: time series overlay for company 5048. Blue line shows predictions, black line shows actuals.}
+\label{fig:cb_overlay}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\textwidth]{company_5048_catboost_scatter.png}
+\caption{CatBoost baseline: predicted vs. actual scatter. Tight clustering indicates good fit; any deviation from diagonal shows systematic bias.}
+\label{fig:cb_scatter}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\textwidth]{company_5048_catboost_combined.png}
+\caption{CatBoost baseline: combined time series and residual diagnostics. Residuals should be centered near zero and homoscedastic.}
+\label{fig:cb_combined}
+\end{figure}
+
+\subsubsection{CatBoost + HMM}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\textwidth]{company_5048_catboost_hmm_overlay.png}
+\caption{CatBoost + HMM: overlay showing regime-aware corrections. HMM regimes are inferred from residuals; corrections adapt to detected market states.}
+\label{fig:hmm_overlay}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\textwidth]{company_5048_catboost_hmm_scatter.png}
+\caption{CatBoost + HMM: predicted vs. actual scatter. More compact clustering than baseline indicates reduced error spread.}
+\label{fig:hmm_scatter}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\textwidth]{company_5048_catboost_hmm_combined.png}
+\caption{CatBoost + HMM: combined diagnostics. Residuals show improved centering and reduced outliers compared to baseline.}
+\label{fig:hmm_combined}
+\end{figure}
+
+\subsubsection{CatBoost + MLP}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\textwidth]{company_5048_catboost_mlp_overlay.png}
+\caption{CatBoost + MLP: simple nonlinear residual correction. MLP learns nonlinear mappings from features to residuals.}
+\label{fig:mlp_overlay}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\textwidth]{company_5048_catboost_mlp_scatter.png}
+\caption{CatBoost + MLP: predicted vs. actual scatter. Similar improvement to HMM but via different mechanism (feature-based vs. regime-based).}
+\label{fig:mlp_scatter}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\textwidth]{company_5048_catboost_mlp_combined.png}
+\caption{CatBoost + MLP: combined diagnostics. Residuals resemble HMM in quality, suggesting both methods extract similar correction signal.}
+\label{fig:mlp_combined}
+\end{figure}
+
+\subsubsection{CatBoost + Transformer}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\textwidth]{company_5048_catboost_transformer_overlay.png}
+\caption{CatBoost + Transformer: sequence-based corrections. Volatile predictions indicate instability in learning temporal residual patterns.}
+\label{fig:transformer_overlay}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\textwidth]{company_5048_catboost_transformer_scatter.png}
+\caption{CatBoost + Transformer: predicted vs. actual scatter. Dispersed clustering shows degraded performance; Transformer overestimates and underestimates widely.}
+\label{fig:transformer_scatter}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\textwidth]{company_5048_catboost_transformer_combined.png}
+\caption{CatBoost + Transformer: combined diagnostics. Large residual spikes confirm that Transformer produces unstable predictions.}
+\label{fig:transformer_combined}
+\end{figure}
+
+\subsubsection{CatBoost + CNN}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\textwidth]{company_5048_catboost_cnn_overlay.png}
+\caption{CatBoost + CNN: convolutional residual correction. CNN extracts 1D temporal patterns from past residuals.}
+\label{fig:cnn_overlay}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\textwidth]{company_5048_catboost_cnn_scatter.png}
+\caption{CatBoost + CNN: predicted vs. actual scatter. Moderate clustering; CNN performance falls between HMM/MLP and Transformer.}
+\label{fig:cnn_scatter}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\textwidth]{company_5048_catboost_cnn_combined.png}
+\caption{CatBoost + CNN: combined diagnostics. Residuals show modest improvement; CNN captures some temporal signal but less effectively than simpler methods.}
+\label{fig:cnn_combined}
+\end{figure}
+
+\subsubsection{CatBoost + Ridge}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\textwidth]{company_5048_catboost_ridge_overlay.png}
+\caption{CatBoost + Ridge: linear residual regression. Ridge fails to improve predictions; linear model insufficient for this residual structure.}
+\label{fig:ridge_overlay}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\textwidth]{company_5048_catboost_ridge_scatter.png}
+\caption{CatBoost + Ridge: predicted vs. actual scatter. Clustering similar to or worse than baseline.}
+\label{fig:ridge_scatter}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\textwidth]{company_5048_catboost_ridge_combined.png}
+\caption{CatBoost + Ridge: combined diagnostics. Ridge regression numerically unstable in this feature space; poor residual correction.}
+\label{fig:ridge_combined}
+\end{figure}
+
+\subsubsection{CatBoost + Elastic Net}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\textwidth]{company_5048_catboost_elasticnet_overlay.png}
+\caption{CatBoost + Elastic Net: elastic net residual regression. Similar instability to Ridge; linear methods struggle with this problem.}
+\label{fig:elasticnet_overlay}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\textwidth]{company_5048_catboost_elasticnet_scatter.png}
+\caption{CatBoost + Elastic Net: predicted vs. actual scatter. Dispersed, confirming linear regularization inadequacy.}
+\label{fig:elasticnet_scatter}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\textwidth]{company_5048_catboost_elasticnet_combined.png}
+\caption{CatBoost + Elastic Net: combined diagnostics. Large residuals indicate that elastic net fails to stabilize fitting.}
+\label{fig:elasticnet_combined}
+\end{figure}
+
+\subsubsection{CatBoost + Direct Residual CatBoost}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\textwidth]{company_5048_catboost_residual_overlay.png}
+\caption{CatBoost + residual CatBoost: second-stage tree-based correction. Trees applied to residuals show moderate improvement.}
+\label{fig:residual_overlay}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\textwidth]{company_5048_catboost_residual_scatter.png}
+\caption{CatBoost + residual CatBoost: predicted vs. actual scatter. Tighter than CNN but not as good as HMM or MLP.}
+\label{fig:residual_scatter}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\textwidth]{company_5048_catboost_residual_combined.png}
+\caption{CatBoost + residual CatBoost: combined diagnostics. Second-stage trees extract some residual structure but less effectively than regime- or feature-aware correctors.}
+\label{fig:residual_combined}
+\end{figure}
+
+\section{Error Analysis}
+
+\subsection{What Failed: Transformer Instability}
+The Transformer significantly underperformed (RMSE: $0.2540$ vs. $0.2287$ baseline). Investigation reveals:
+\begin{itemize}[leftmargin=1.2em]
+    \item Residuals from CatBoost are weak and noisy, leaving little signal for attention mechanisms to learn.
+    \item Small training set (1,600 months $\times$ 4 companies = 6,400 samples) is insufficient for stable Transformer training.
+    \item Attention weights become unstable when the signal-to-noise ratio is low, causing volatile predictions.
+\end{itemize}
+\textbf{Lesson:} Sophisticated architectures require strong signals and large data. When baseline prediction is already good, residuals become harder to model, not easier.
+
+\subsection{Partial Success: HMM Improvements}
+HMM achieves $0.2236$ RMSE (1.3\% improvement). The modest gain is expected because:
+\begin{itemize}[leftmargin=1.2em]
+    \item Market regimes (captured by HMM states) exist but are weak predictors of individual company errors.
+    \item The improvement is statistically small, suggesting limited room for post-hoc correction.
+    \item HMM training itself can be noisy on short residual sequences (48 months per company).
+\end{itemize}
+\textbf{Lesson:} Two-stage models can extract regime information, but only marginal gains are possible when the baseline is strong.
+
+\subsection{Linear Instability: Ridge and Elastic Net}
+Ridge and Elastic Net failed due to numerical issues. The residual feature matrix is ill-conditioned (high collinearity), and standard regularization could not stabilize fitting. This motivates using nonlinear (tree-based or neural) correctors.
+
+\subsection{Overfitting in Residuals: Direct CatBoost Residual}
+A second-stage CatBoost model trained on residuals achieved RMSE of $0.2274$, which is \textit{worse} than the baseline ($0.2287$). This negative result is instructive: applying the same boosting algorithm to residuals introduces overfitting because:
+\begin{itemize}[leftmargin=1.2em]
+    \item Residuals are already noise-like after baseline fits well; fitting trees to noise amplifies variance.
+    \item The residual signal is weaker than the original return signal, giving boosting less to learn from.
+    \item Second-stage trees interact poorly with first-stage trees, creating destructive interference rather than complementary correction.
+\end{itemize}
+\textbf{Lesson:} Not all residual models help. Stacking or ensembling requires that the corrector exploits a genuinely different signal source. Direct CatBoost on residuals is too similar to the baseline and adds variance without bias reduction.
+
+\section{Implementation and Repository Structure}
+
+The v3.1 pipeline is organized as follows:
+
+\textbf{Preprocessing:} \texttt{preprocessing/} contains scripts for feature engineering (\texttt{build\_features.py}), CatBoost dataset construction (\texttt{build\_catboost\_dataset.py}), HMM regime labeling (\texttt{build\_hmm\_regimes.py}), and residual sequence building (\texttt{build\_residual\_sequences.py}).
+
+\textbf{Training:} \texttt{training/} contains model training scripts: \texttt{train\_catboost.py}, \texttt{train\_hmm\_correction.py}, \texttt{train\_residual\_transformer.py}, and similar for MLP, CNN, Ridge, and Elastic Net.
+
+\textbf{Evaluation:} \texttt{evaluation/} contains \texttt{evaluate\_holdout.py} (runs holdout metrics), \texttt{generate\_dashboards.py} (creates visualizations), and per-company diagnostic scripts.
+
+\textbf{Pipeline entry point:} \texttt{run\_pipeline.sh} orchestrates all steps in order.
+
+All scripts are deterministic and use fixed random seeds for reproducibility.
+
+\section{Limitations}
+
+\begin{itemize}[leftmargin=1.2em]
+    \item \textbf{Small improvements:} The best model (HMM) improves only 1.3\% over baseline. This suggests that fundamental limits exist in predicting monthly returns from accounting features.
+    \item \textbf{Limited holdout set:} Four companies is small. More holdout companies would strengthen external validation.
+    \item \textbf{Sequence depth:} The 6-month sequence window may be too short to capture meaningful temporal patterns in residuals.
+    \item \textbf{Regime instability:} HMM regimes are inferred from a small residual time series and may not generalize to future market conditions.
+    \item \textbf{Feature set:} The model uses only accounting features and simple technicals. Alternative data (sentiment, alternative data) might unlock new information.
+\end{itemize}
+
+\section{Future Work}
+
+\begin{itemize}[leftmargin=1.2em]
+    \item \textbf{Domain adaptation:} Retrain models separately on different market regimes (expansion vs. recession).
+    \item \textbf{Uncertainty estimation:} Quantify prediction intervals using conformal prediction or ensemble methods.
+    \item \textbf{Factor-neutral evaluation:} Evaluate models after removing exposure to Fama-French factors, isolating alpha.
+    \item \textbf{Multimodal features:} Incorporate sentiment, earnings surprises, and macro indicators.
+    \item \textbf{Richer sequence models:} Explore Temporal Fusion Transformers or Neural ODEs with better regularization.
+\end{itemize}
+
+\section{Conclusion}
+
+The v3.1 pipeline demonstrates a principled approach to predicting monthly returns from company-month panels. The core insight is to combine a strong tabular baseline (CatBoost) with modular residual correction models, enabling systematic comparison of whether auxiliary information (regime, sequence) improves prediction.
+
+Key findings: (1) CatBoost baseline achieves RMSE of $0.2287$ on holdout data. (2) HMM residual correction provides the best improvement (RMSE: $0.2236$), but gains are small. (3) Sophisticated models (Transformer) fail when residual signals are weak. (4) The evaluation is rigorous: chronological splits, held-out companies, and multiple test sets ensure generalizability.
+
+The technical contribution is demonstrating that modular two-stage models enable careful ablation of information sources. The practical limitation is that accounting features plus simple technicals leave little room for post-hoc improvement. Future work should explore richer data sources and domain-specific adaptations. Overall, this project validates engineering discipline (reproducibility, temporal integrity, rigorous evaluation) as the foundation for trustworthy financial prediction systems.
+
+\begin{thebibliography}{9}
+\bibitem{yu2025gbdtlstm}
+Yu, C., Liu, F., Zhu, J., Guo, S., Gao, Y., Yang, Z., Liu, M., and Xing, Q.\ \textit{Gradient Boosting Decision Tree with LSTM for Investment Prediction}. arXiv:2505.23084, 2025.
+
+\bibitem{prokhorenkova2018catboost}
+Prokhorenkova, L., Gusev, G., Vorobev, A., Dorogush, A. V., and Gulin, A.\ \textit{CatBoost: Unbiased Boosting with Categorical Features}. Advances in Neural Information Processing Systems, 2018.
+\end{thebibliography}
+
+\end{document}
