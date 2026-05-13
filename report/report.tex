@@ -136,7 +136,7 @@ To prevent look-ahead bias, data is split chronologically:
 Split & Date Range & Purpose \\
 \midrule
 Train & 2001-05 to 2020-12 & Fit baseline and residual models \\
-Validation & 2021-01 to 2021-12 & Tune hyperparameters and select models \\
+Validation & 2021-01 to 2021-12 & Tune hyperparameters and train residual models \\
 Gap Buffer & 2022-01 to 2022-06 & Prevent leakage between val and test \\
 Holdout Test & 2022-07 to 2025-03 & Clean evaluation on unseen companies \\
 \bottomrule
